@@ -1,0 +1,113 @@
+---
+kind: pipeline
+name: default-amd64
+
+platform:
+  os: linux
+  arch: amd64
+
+steps:
+- name: docker-publish
+  pull: default
+  image: plugins/docker
+  settings:
+    dockerfile: Dockerfile
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+    repo: cnrancher/k8s-net-attach-def-controller
+    tag: ${DRONE_TAG}-linux-amd64
+  when:
+    event:
+    - tag
+
+volumes:
+- name: docker
+  host:
+    path: /var/run/docker.sock
+
+trigger:
+  event:
+  - tag
+
+node:
+  instance: agent-amd64
+
+---
+kind: pipeline
+name: default-arm64
+
+platform:
+  os: linux
+  arch: arm64
+
+steps:
+- name: docker-publish
+  pull: default
+  image: plugins/docker
+  settings:
+    build_args:
+    - ARCH=arm64
+    dockerfile: Dockerfile
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+    repo: cnrancher/k8s-net-attach-def-controller
+    tag: ${DRONE_TAG}-linux-arm64
+  when:
+    event:
+    - tag
+
+volumes:
+- name: docker
+  host:
+    path: /var/run/docker.sock
+
+trigger:
+  event:
+  - tag
+
+node:
+  instance: agent-arm64
+
+---
+kind: pipeline
+name: manifest
+
+platform:
+  os: linux
+  arch: amd64
+
+steps:
+- name: push-manifest
+  image: plugins/manifest
+  settings:
+    ignore_missing: true
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+    spec: manifest.tmpl
+  when:
+    event:
+    - tag
+
+volumes:
+- name: docker
+  host:
+    path: /var/run/docker.sock
+
+trigger:
+  event:
+  - tag
+
+node:
+  instance: agent-amd64
+
+depends_on:
+- default-amd64
+- default-arm64
+
+...
