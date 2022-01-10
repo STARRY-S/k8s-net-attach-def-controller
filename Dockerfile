@@ -11,7 +11,7 @@ RUN apk add --update make && \
 
 RUN ls -al /usr/src/k8s-net-attach-def-controller
 
-FROM alpine
+FROM alpine:3.14
 COPY --from=builder /usr/src/k8s-net-attach-def-controller/build/k8s-net-attach-def-controller /usr/bin/
 WORKDIR /
 
