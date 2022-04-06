@@ -14,7 +14,7 @@ import (
 	clientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
 	sharedInformers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions"
 
-	"github.com/K8sNetworkPlumbingWG/k8s-net-attach-def-controller/pkg/controller"
+	"github.com/k8snetworkplumbingwg/k8s-net-attach-def-controller/pkg/controller"
 )
 
 var (

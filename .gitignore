@@ -1,0 +1,9 @@
+/.dapper
+/bin
+/dist
+/build
+*.swp
+/.trash-cache
+/trash.lock
+/.idea
+/.gopath
