@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"k8s.io/klog"
 	"k8s.io/kubernetes/pkg/api/v1/endpoints"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
 
 	"gopkg.in/intel/multus-cni.v3/types"
 
@@ -279,7 +281,7 @@ func (c *NetworkController) sync(key string) error {
 
 	// update endpoints resource
 	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		result, getErr := c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Get(ep.Name, metav1.GetOptions{})
+		result, getErr := c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Get(context.TODO(), ep.Name, metav1.GetOptions{})
 		if getErr != nil {
 			klog.Errorf("Failed to get latest version of endpoints: %v", getErr)
 			return getErr
@@ -298,7 +300,7 @@ func (c *NetworkController) sync(key string) error {
 		// repack subsets - NOTE: too naive? additional checks needed?
 		result.Subsets = endpoints.RepackSubsets(subsets)
 
-		_, updateErr := c.k8sClientSet.Core().Endpoints(ep.Namespace).Update(result)
+		_, updateErr := c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Update(context.TODO(), result, metav1.UpdateOptions{})
 		return updateErr
 	})
 	if retryErr != nil {
@@ -338,7 +340,7 @@ func (c *NetworkController) handlePodEvent(obj interface{}) {
 	}
 
 	// if not behind any service discard
-	services, err := c.serviceLister.GetPodServices(pod)
+	services, err := helper.GetPodServices(c.serviceLister, pod)
 	if err != nil {
 		klog.V(4).Info("skipping pod event: %s", err)
 		return
@@ -384,17 +386,17 @@ func (c *NetworkController) handleNetAttachDefDeleteEvent(obj interface{}) {
 				if net.Namespace == namespace && net.Name == name {
 					klog.Infof("pod %s uses net-attach-def %s/%s which needs to be recreated\n", pod.ObjectMeta.Name, namespace, name)
 					/* check whether the object somehow still exists */
-					_, err := c.netAttachDefClientSet.K8sCniCncfIo().
+					_, err := c.netAttachDefClientSet.K8sCniCncfIoV1().
 						NetworkAttachmentDefinitions(netAttachDef.GetNamespace()).
-						Get(netAttachDef.GetName(), metav1.GetOptions{})
+						Get(context.TODO(), netAttachDef.GetName(), metav1.GetOptions{})
 					if err != nil {
 						/* recover deleted object */
 						recovered := obj.(*netattachdef.NetworkAttachmentDefinition).DeepCopy()
 						recovered.ObjectMeta.ResourceVersion = "" // ResourceVersion field needs to be cleared before recreating the object
 						_, err = c.netAttachDefClientSet.
-							K8sCniCncfIo().
+							K8sCniCncfIoV1().
 							NetworkAttachmentDefinitions(netAttachDef.GetNamespace()).
-							Create(recovered)
+							Create(context.TODO(), recovered, metav1.CreateOptions{})
 						if err != nil {
 							klog.Errorf("error recreating recovered object: %s", err.Error())
 						}
