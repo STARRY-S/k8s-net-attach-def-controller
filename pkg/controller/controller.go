@@ -76,6 +76,11 @@ func NewNetworkController(
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: k8sClientSet.CoreV1().Events("")})
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerAgentName})
 
+	rateLimiter := workqueue.NewMaxOfRateLimiter(
+		workqueue.NewItemFastSlowRateLimiter(time.Millisecond, 2*time.Minute, 30),
+		workqueue.NewItemExponentialFailureRateLimiter(5*time.Millisecond, 30*time.Second),
+	)
+
 	NetworkController := &NetworkController{
 		k8sClientSet:          k8sClientSet,
 		netAttachDefClientSet: netAttachDefClientSet,
@@ -86,7 +91,7 @@ func NewNetworkController(
 		serviceLister:         serviceInformer.Lister(),
 		podsLister:            podInformer.Lister(),
 		endpointsLister:       endpointInformer.Lister(),
-		workqueue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "secondary_endpoints"),
+		workqueue:             workqueue.NewNamedRateLimitingQueue(rateLimiter, "secondary_endpoints"),
 		recorder:              recorder,
 	}
 
