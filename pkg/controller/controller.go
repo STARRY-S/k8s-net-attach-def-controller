@@ -414,17 +414,27 @@ func (c *NetworkController) handleNetAttachDefDeleteEvent(obj interface{}) {
 	}
 }
 
-// Start runs worker thread after performing cache synchronization
-func (c *NetworkController) Start(stopChan <-chan struct{}) {
-	klog.V(4).Infof("starting network controller")
+// Run will set up the event handlers for types we are interested in, as well
+// as syncing informer caches and starting workers. It will block until stopCh
+// is closed, at which point it will shutdown the workqueue and wait for
+// workers to finish processing their current work items.
+func (c *NetworkController) Run(workers int, stopChan <-chan struct{}) {
+	defer utilruntime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
+	klog.V(4).Infof("starting network controller")
+
+	// Wait for the caches to be synced before starting workers
+	klog.Info("Waiting for informer caches to sync")
 	if ok := cache.WaitForCacheSync(stopChan, c.netAttachDefsSynced, c.endpointsSynced, c.servicesSynced, c.podsSynced); !ok {
 		klog.Fatalf("failed waiting for caches to sync")
 	}
+	klog.Info("Starting workers")
+	for i := 0; i < workers; i++ {
+		go wait.Until(c.worker, time.Second, stopChan)
+	}
 
-	go wait.Until(c.worker, time.Second, stopChan)
-
+	klog.Info("Started workers")
 	<-stopChan
 	klog.V(4).Infof("shutting down network controller")
 	return

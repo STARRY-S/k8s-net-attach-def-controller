@@ -2,14 +2,13 @@ package main
 
 import (
 	"flag"
-	"os"
-	"os/signal"
 	"time"
 
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
+	"k8s.io/sample-controller/pkg/signals"
 
 	clientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
 	sharedInformers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions"
@@ -23,6 +22,9 @@ var (
 
 	// defines default resync period between k8s API server and controller
 	syncPeriod = time.Second * 30
+
+	// default workers of this controller
+	defaultWorkers = 3
 )
 
 func main() {
@@ -37,6 +39,9 @@ func main() {
 
 	// make sure we flush before exiting
 	defer klog.Flush()
+
+	// set up signals so we handle the first shutdown signal gracefully
+	stopChan := signals.SetupSignalHandler()
 
 	cfg, err := clientcmd.BuildConfigFromFlags(master, kubeconfig)
 	if err != nil {
@@ -65,17 +70,8 @@ func main() {
 		k8sInformerFactory.Core().V1().Endpoints(),
 	)
 
-	stopChan := make(chan struct{})
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	go func() {
-		<-c
-		close(stopChan)
-		<-c
-		os.Exit(1)
-	}()
-
 	netAttachDefInformerFactory.Start(stopChan)
 	k8sInformerFactory.Start(stopChan)
-	networkController.Start(stopChan)
+
+	networkController.Run(defaultWorkers, stopChan)
 }

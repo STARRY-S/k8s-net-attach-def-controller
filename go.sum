@@ -1083,6 +1083,8 @@ k8s.io/legacy-cloud-providers v0.20.6/go.mod h1:lnKwZLluN1xsZJ0/hQeQxWT9FerkyzWt
 k8s.io/metrics v0.20.6/go.mod h1:d+OAIaXutom9kGWcBit/M8OkDpIzBKTsm47+KcUt7VI=
 k8s.io/mount-utils v0.20.6/go.mod h1:Jv9NRZ5L2LF87A17GaGlArD+r3JAJdZFvo4XD1cG4Kc=
 k8s.io/sample-apiserver v0.20.6/go.mod h1:MX+CMGTTQ+98W2b6JljcQo8ZisMYHsrB00UURehqDF8=
+k8s.io/sample-controller v0.20.6 h1:rE4ou4i9HDhZ3RRwUPotqLFSnZGjI55OU8QcprDWFVk=
+k8s.io/sample-controller v0.20.6/go.mod h1:w0br6VT5hRlkLNfUWNNARnUeoUHIiSjA3Ll1+7Sp6xE=
 k8s.io/system-validators v1.2.0/go.mod h1:bPldcLgkIUK22ALflnsXk8pvkTEndYdNuaHH6gRrl0Q=
 k8s.io/utils v0.0.0-20201110183641-67b214c5f920 h1:CbnUZsM497iRC5QMVkHwyl8s2tB3g7yaSHkYPkpgelw=
 k8s.io/utils v0.0.0-20201110183641-67b214c5f920/go.mod h1:jPW/WVKK9YHAvNhRxK0md/EJ228hCsBRufyofKtW8HA=

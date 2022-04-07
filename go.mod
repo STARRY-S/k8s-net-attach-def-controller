@@ -46,4 +46,5 @@ require (
 	k8s.io/client-go v12.0.0+incompatible
 	k8s.io/klog/v2 v2.4.0
 	k8s.io/kubernetes v1.20.6
+	k8s.io/sample-controller v0.20.6
 )
