@@ -22,7 +22,7 @@ var (
 	kubeconfig string
 
 	// defines default resync period between k8s API server and controller
-	syncPeriod = time.Second * 5
+	syncPeriod = time.Second * 30
 )
 
 func main() {
