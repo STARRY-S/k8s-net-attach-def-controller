@@ -2,12 +2,13 @@ package controller
 
 import (
 	"encoding/json"
-	"github.com/pkg/errors"
 	"regexp"
 	"strings"
 
+	"github.com/pkg/errors"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"gopkg.in/intel/multus-cni.v3/types"
 )
