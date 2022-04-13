@@ -242,7 +242,7 @@ func (c *NetworkController) sync(key string) error {
 		}
 		// find networks used by pod and match network annotation of the service
 		for _, status := range networksStatus {
-			if isInNetworkSelectionElementsArray(status.Name, networks) {
+			if isInNetworkSelectionElementsArray(status.Name, pod.Namespace, networks) {
 				klog.V(3).Infof("processing pod %s/%s: found network %s interface %s with IP addresses %s",
 					pod.Namespace, pod.Name, annotations, status.Interface, status.IPs)
 				// all IPs of matching network are added as endpoints

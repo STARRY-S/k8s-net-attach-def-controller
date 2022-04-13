@@ -39,10 +39,24 @@ func getNetworkAnnotations(obj interface{}) string {
 	return annotations
 }
 
-func isInNetworkSelectionElementsArray(name string, networks []*types.NetworkSelectionElement) bool {
-	// NOTE: what about namespaces
+func isInNetworkSelectionElementsArray(name, namespace string, networks []*types.NetworkSelectionElement) bool {
+	// https://github.com/k8snetworkplumbingwg/multus-cni/blob/v3.7.2/pkg/types/conf.go#L109
+	var netName, netNamespace string
+	units := strings.SplitN(name, "/", 2)
+	switch len(units) {
+	case 1:
+		netName = units[0]
+		netNamespace = namespace
+	case 2:
+		netNamespace = units[0]
+		netName = units[1]
+	default:
+		err := errors.Errorf("invalid network status - '%s'", name)
+		klog.Error(err)
+		return false
+	}
 	for i := range networks {
-		if name == networks[i].Name {
+		if netName == networks[i].Name && netNamespace == networks[i].Namespace {
 			return true
 		}
 	}
