@@ -18,5 +18,4 @@ WORKDIR /
 
 LABEL io.k8s.display-name="Network Attachment Definitions Controller"
 
-ENTRYPOINT ["/usr/bin/k8s-net-attach-def-controller", "--alsologtostderr"]
-
+ENTRYPOINT ["/usr/bin/k8s-net-attach-def-controller"]

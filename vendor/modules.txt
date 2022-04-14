@@ -437,8 +437,10 @@ k8s.io/kubernetes/pkg/util/hash
 ## explicit
 k8s.io/sample-controller/pkg/signals
 # k8s.io/utils v0.0.0-20201110183641-67b214c5f920
+## explicit
 k8s.io/utils/buffer
 k8s.io/utils/integer
+k8s.io/utils/pointer
 k8s.io/utils/trace
 # sigs.k8s.io/structured-merge-diff/v4 v4.0.3
 sigs.k8s.io/structured-merge-diff/v4/value

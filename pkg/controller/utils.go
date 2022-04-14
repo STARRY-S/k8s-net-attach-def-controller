@@ -1,13 +1,17 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"regexp"
 	"strings"
 
 	"github.com/pkg/errors"
 
+	discovery "k8s.io/api/discovery/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
 	"gopkg.in/intel/multus-cni.v3/types"
@@ -150,4 +154,15 @@ func parsePodNetworkSelectionElement(selection, defaultNamespace string) (*types
 	}
 
 	return networkSelectionElement, nil
+}
+
+func endpointSlicesForService(k8sClientSet kubernetes.Interface, namespace, name string) (*discovery.EndpointSliceList, error) {
+	esLabelSelector := labels.Set(map[string]string{
+		discovery.LabelServiceName: name,
+	}).AsSelectorPreValidated()
+
+	listOpt := metav1.ListOptions{
+		LabelSelector: esLabelSelector.String(),
+	}
+	return k8sClientSet.DiscoveryV1beta1().EndpointSlices(namespace).List(context.TODO(), listOpt)
 }

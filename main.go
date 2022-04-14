@@ -6,6 +6,7 @@ import (
 
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	"k8s.io/sample-controller/pkg/signals"
@@ -48,6 +49,10 @@ func main() {
 		klog.Fatalf("error building kubeconfig: %s", err.Error())
 	}
 
+	if !klog.V(4).Enabled() {
+		cfg.WarningHandler = rest.NoWarnings{}
+	}
+
 	k8sClientSet, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		klog.Fatalf("error creating kubernetes clientset: %s", err.Error())
@@ -68,6 +73,7 @@ func main() {
 		k8sInformerFactory.Core().V1().Services(),
 		k8sInformerFactory.Core().V1().Pods(),
 		k8sInformerFactory.Core().V1().Endpoints(),
+		k8sInformerFactory.Discovery().V1beta1().EndpointSlices(),
 	)
 
 	netAttachDefInformerFactory.Start(stopChan)

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -14,10 +16,12 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	coreinformers "k8s.io/client-go/informers/core/v1"
+	discoveryinformers "k8s.io/client-go/informers/discovery/v1beta1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	discoverylisters "k8s.io/client-go/listers/discovery/v1beta1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
@@ -26,6 +30,7 @@ import (
 	"k8s.io/kubernetes/pkg/api/v1/endpoints"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
+	utilpointer "k8s.io/utils/pointer"
 
 	"gopkg.in/intel/multus-cni.v3/types"
 
@@ -35,9 +40,10 @@ import (
 )
 
 const (
-	selectionsKey       = "k8s.v1.cni.cncf.io/networks"
-	statusesKey         = "k8s.v1.cni.cncf.io/networks-status"
-	controllerAgentName = "k8s-net-attach-def-controller"
+	selectionsKey    = "k8s.v1.cni.cncf.io/networks"
+	statusesKey      = "k8s.v1.cni.cncf.io/networks-status"
+	controllerName   = "net-attach-def.panda.io"
+	svcSuffixMacvlan = "-macvlan"
 )
 
 // NetworkController is the controller implementation for handling net-attach-def resources and other objects using them
@@ -56,6 +62,9 @@ type NetworkController struct {
 	endpointsLister corelisters.EndpointsLister
 	endpointsSynced cache.InformerSynced
 
+	endpointSliceLister  discoverylisters.EndpointSliceLister
+	endpointSlicesSynced cache.InformerSynced
+
 	workqueue workqueue.RateLimitingInterface
 
 	recorder record.EventRecorder
@@ -68,20 +77,21 @@ func NewNetworkController(
 	netAttachDefInformer informers.NetworkAttachmentDefinitionInformer,
 	serviceInformer coreinformers.ServiceInformer,
 	podInformer coreinformers.PodInformer,
-	endpointInformer coreinformers.EndpointsInformer) *NetworkController {
+	endpointInformer coreinformers.EndpointsInformer,
+	endpointSliceInformer discoveryinformers.EndpointSliceInformer) *NetworkController {
 
 	klog.V(3).Info("creating event broadcaster")
 	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(klog.Infof)
+	eventBroadcaster.StartLogging(klog.V(4).Infof)
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: k8sClientSet.CoreV1().Events("")})
-	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerAgentName})
+	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerName})
 
 	rateLimiter := workqueue.NewMaxOfRateLimiter(
 		workqueue.NewItemFastSlowRateLimiter(time.Millisecond, 2*time.Minute, 30),
 		workqueue.NewItemExponentialFailureRateLimiter(5*time.Millisecond, 30*time.Second),
 	)
 
-	NetworkController := &NetworkController{
+	networkController := &NetworkController{
 		k8sClientSet:          k8sClientSet,
 		netAttachDefClientSet: netAttachDefClientSet,
 		netAttachDefsSynced:   netAttachDefInformer.Informer().HasSynced,
@@ -91,48 +101,60 @@ func NewNetworkController(
 		serviceLister:         serviceInformer.Lister(),
 		podsLister:            podInformer.Lister(),
 		endpointsLister:       endpointInformer.Lister(),
+		endpointSliceLister:   endpointSliceInformer.Lister(),
+		endpointSlicesSynced:  endpointSliceInformer.Informer().HasSynced,
 		workqueue:             workqueue.NewNamedRateLimitingQueue(rateLimiter, "secondary_endpoints"),
 		recorder:              recorder,
 	}
 
 	netAttachDefInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		DeleteFunc: NetworkController.handleNetAttachDefDeleteEvent,
+		DeleteFunc: networkController.handleNetAttachDefDeleteEvent,
 	})
 
 	/* setup handlers for endpoints events */
 	endpointInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: NetworkController.handleEndpointEvent,
+		AddFunc: networkController.handleEndpointEvent,
 		UpdateFunc: func(old, updated interface{}) {
 			if objectChanged(old, updated) {
-				NetworkController.handleEndpointEvent(updated)
+				networkController.handleEndpointEvent(updated)
 			}
 		},
-		DeleteFunc: NetworkController.handleEndpointEvent,
+		DeleteFunc: networkController.handleEndpointEvent,
 	})
 
 	/* setup handlers for services events */
 	serviceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: NetworkController.handleServiceEvent,
+		AddFunc: networkController.handleServiceEvent,
 		UpdateFunc: func(old, updated interface{}) {
 			if objectChanged(old, updated) || networkAnnotationsChanged(old, updated) {
-				NetworkController.handleServiceEvent(updated)
+				networkController.handleServiceEvent(updated)
 			}
 		},
-		DeleteFunc: NetworkController.handleServiceEvent,
+		DeleteFunc: networkController.handleServiceEvent,
 	})
 
 	/* setup handlers for pods events */
 	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: NetworkController.handlePodEvent,
+		AddFunc: networkController.handlePodEvent,
 		UpdateFunc: func(old, updated interface{}) {
 			if objectChanged(old, updated) {
-				NetworkController.handlePodEvent(updated)
+				networkController.handlePodEvent(updated)
 			}
 		},
-		DeleteFunc: NetworkController.handlePodEvent,
+		DeleteFunc: networkController.handlePodEvent,
 	})
 
-	return NetworkController
+	/* setup handlers for endpointslice events */
+	endpointSliceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: networkController.handleEndpointSliceEvent,
+		UpdateFunc: func(old, updated interface{}) {
+			if objectChanged(old, updated) {
+				networkController.handleEndpointSliceEvent(updated)
+			}
+		},
+	})
+
+	return networkController
 }
 
 func (c *NetworkController) worker() {
@@ -158,6 +180,11 @@ func (c *NetworkController) processNextWorkItem() bool {
 			return nil
 		}
 
+		if !strings.HasSuffix(key, svcSuffixMacvlan) {
+			klog.V(4).Infof("ignore svc %s as has no %s suffic", key, svcSuffixMacvlan)
+			return nil
+		}
+
 		if err := c.sync(key); err != nil {
 			c.workqueue.AddRateLimited(key)
 			return fmt.Errorf("error syncing '%s': %s, requeuing", key, err.Error())
@@ -174,7 +201,6 @@ func (c *NetworkController) processNextWorkItem() bool {
 	}
 
 	return true
-
 }
 
 func (c *NetworkController) sync(key string) error {
@@ -199,7 +225,7 @@ func (c *NetworkController) sync(key string) error {
 	if len(annotations) == 0 {
 		return nil
 	}
-	klog.Infof("service network annotation found: %v", annotations)
+	klog.V(3).Infof("service network annotation found: %v", annotations)
 	networks, err := parsePodNetworkSelections(annotations, svc.Namespace)
 	if err != nil {
 		klog.Errorf("service network annotation parse error: %v", err)
@@ -217,27 +243,31 @@ func (c *NetworkController) sync(key string) error {
 	pods, err := c.podsLister.List(selector)
 	if err != nil {
 		// no selector or no pods running
-		klog.V(4).Infof("error listing pods matching service selector: %s", err)
+		klog.Infof("error listing pods matching service selector: %s", err)
 		return err
 	}
 
 	// get endpoints of the service
 	ep, err := c.endpointsLister.Endpoints(svc.Namespace).Get(svc.Name)
 	if err != nil {
-		klog.V(4).Infof("error getting service endpoints: %s", err)
+		klog.Infof("error getting service endpoints: %s", err)
 		return err
 	}
 
 	subsets := make([]corev1.EndpointSubset, 0)
+	epsForEndpointSlice := make([]discovery.Endpoint, 0)
 
 	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
 		addresses := make([]corev1.EndpointAddress, 0)
 		ports := make([]corev1.EndpointPort, 0)
 
 		networksStatus := make([]types.NetworkStatus, 0)
 		err := json.Unmarshal([]byte(pod.Annotations[statusesKey]), &networksStatus)
 		if err != nil {
-			klog.Warningf("error reading pod networks status: %s", err)
+			klog.Warningf("error reading pod %s networks status: %v", pod.Name, err)
 			continue
 		}
 		// find networks used by pod and match network annotation of the service
@@ -259,6 +289,22 @@ func (c *NetworkController) sync(key string) error {
 						},
 					}
 					addresses = append(addresses, epAddress)
+
+					esAddress := discovery.Endpoint{
+						Addresses: []string{ip},
+						Conditions: discovery.EndpointConditions{
+							Ready: utilpointer.BoolPtr(true),
+						},
+						NodeName: &pod.Spec.NodeName,
+						TargetRef: &corev1.ObjectReference{
+							Kind:            "Pod",
+							Name:            pod.GetName(),
+							Namespace:       pod.GetNamespace(),
+							ResourceVersion: pod.GetResourceVersion(),
+							UID:             pod.GetUID(),
+						},
+					}
+					epsForEndpointSlice = append(epsForEndpointSlice, esAddress)
 				}
 			}
 		}
@@ -266,7 +312,7 @@ func (c *NetworkController) sync(key string) error {
 			// check whether pod has the ports needed by service and add them to endpoints if so
 			portNumber, err := podutil.FindPort(pod, &svc.Spec.Ports[i])
 			if err != nil {
-				klog.V(4).Infof("Could not find pod port for service %s/%s: %s, skipping...", svc.Namespace, svc.Name, err)
+				klog.Infof("Could not find pod port for service %s/%s: %s, skipping...", svc.Namespace, svc.Name, err)
 				continue
 			}
 
@@ -284,15 +330,18 @@ func (c *NetworkController) sync(key string) error {
 		subsets = append(subsets, subset)
 	}
 
+	var updatedEndpoint *corev1.Endpoints
 	// update endpoints resource
 	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		result, getErr := c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Get(context.TODO(), ep.Name, metav1.GetOptions{})
-		if getErr != nil {
-			klog.Errorf("Failed to get latest version of endpoints: %v", getErr)
-			return getErr
+		result, err := c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Get(context.TODO(), ep.Name, metav1.GetOptions{})
+		if err != nil {
+			klog.Errorf("Failed to get latest version of endpoints: %v", err)
+			return err
 		}
 
-		result.SetOwnerReferences(
+		resultCopy := result.DeepCopy()
+
+		resultCopy.SetOwnerReferences(
 			[]metav1.OwnerReference{
 				*metav1.NewControllerRef(svc, schema.GroupVersionKind{
 					Group:   corev1.SchemeGroupVersion.Group,
@@ -303,21 +352,58 @@ func (c *NetworkController) sync(key string) error {
 		)
 
 		// repack subsets - NOTE: too naive? additional checks needed?
-		result.Subsets = endpoints.RepackSubsets(subsets)
+		resultCopy.Subsets = endpoints.RepackSubsets(subsets)
 
-		_, updateErr := c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Update(context.TODO(), result, metav1.UpdateOptions{})
-		return updateErr
+		updatedEndpoint, err = c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Update(context.TODO(), resultCopy, metav1.UpdateOptions{})
+		return err
 	})
 	if retryErr != nil {
-		klog.Errorf("endpoint update error: %v", err)
-		return err
+		klog.Errorf("endpoint update error: %v", retryErr)
+		return retryErr
 	}
 
-	klog.Info("endpoint updated successfully")
 	msg := fmt.Sprintf("Updated to use network %s", annotations)
+	if updatedEndpoint != nil {
+		klog.V(3).Info("endpoint updated successfully")
+		c.recorder.Event(ep, corev1.EventTypeNormal, msg, "Endpoints update successful")
+		c.recorder.Event(svc, corev1.EventTypeNormal, msg, "Endpoints update successful")
+	}
 
-	c.recorder.Event(ep, corev1.EventTypeNormal, msg, "Endpoints update successful")
-	c.recorder.Event(svc, corev1.EventTypeNormal, msg, "Endpoints update successful")
+	endpointSliceUpdated := false
+	klog.V(4).Infof("trying to update endpointslice with %v", epsForEndpointSlice)
+	retryErr = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		endpointSlices, err := endpointSlicesForService(c.k8sClientSet, svc.Namespace, svc.Name)
+		if err != nil {
+			klog.Errorf("endpointslice list error: %v", err)
+			return err
+		}
+
+		for _, endpointSlice := range endpointSlices.Items {
+			esCopy := endpointSlice.DeepCopy()
+			esCopy.Labels[discovery.LabelManagedBy] = controllerName
+			esCopy.Endpoints = epsForEndpointSlice
+			if endpointSlice.AddressType == discovery.AddressTypeIPv4 {
+				_, err = c.k8sClientSet.DiscoveryV1beta1().EndpointSlices(esCopy.Namespace).Update(context.TODO(),
+					esCopy,
+					metav1.UpdateOptions{})
+				if err != nil {
+					klog.Errorf("endpointslice update error: %v", err)
+					return err
+				}
+			}
+			c.recorder.Event(esCopy, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
+			endpointSliceUpdated = true
+		}
+		return nil
+	})
+	if retryErr != nil {
+		klog.Errorf("endpointslice update error: %v", retryErr)
+		return retryErr
+	}
+
+	if endpointSliceUpdated {
+		c.recorder.Event(svc, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
+	}
 
 	return nil
 }
@@ -414,6 +500,19 @@ func (c *NetworkController) handleNetAttachDefDeleteEvent(obj interface{}) {
 	}
 }
 
+func (c *NetworkController) handleEndpointSliceEvent(obj interface{}) {
+	endpointSlice := obj.(*discovery.EndpointSlice)
+	if endpointSlice == nil || endpointSlice.Labels == nil {
+		return
+	}
+	svcName, ok := endpointSlice.Labels[discovery.LabelServiceName]
+	if !ok || svcName == "" {
+		return
+	}
+	key := fmt.Sprintf("%s/%s", endpointSlice.Namespace, svcName)
+	c.workqueue.AddRateLimited(key)
+}
+
 // Run will set up the event handlers for types we are interested in, as well
 // as syncing informer caches and starting workers. It will block until stopCh
 // is closed, at which point it will shutdown the workqueue and wait for
@@ -426,7 +525,12 @@ func (c *NetworkController) Run(workers int, stopChan <-chan struct{}) {
 
 	// Wait for the caches to be synced before starting workers
 	klog.Info("Waiting for informer caches to sync")
-	if ok := cache.WaitForCacheSync(stopChan, c.netAttachDefsSynced, c.endpointsSynced, c.servicesSynced, c.podsSynced); !ok {
+	if ok := cache.WaitForCacheSync(stopChan,
+		c.netAttachDefsSynced,
+		c.endpointsSynced,
+		c.endpointSlicesSynced,
+		c.servicesSynced,
+		c.podsSynced); !ok {
 		klog.Fatalf("failed waiting for caches to sync")
 	}
 	klog.Info("Starting workers")

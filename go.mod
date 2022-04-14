@@ -47,4 +47,5 @@ require (
 	k8s.io/klog/v2 v2.4.0
 	k8s.io/kubernetes v1.20.6
 	k8s.io/sample-controller v0.20.6
+	k8s.io/utils v0.0.0-20201110183641-67b214c5f920
 )

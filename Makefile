@@ -21,7 +21,7 @@ export GOBIN
 # Docker
 IMAGEDIR=$(BASE)/images
 DOCKERFILE=$(CURDIR)/Dockerfile
-TAG=k8s-net-attach-def-controller
+TAG=cnrancher/k8s-net-attach-def-controller
 # Accept proxy settings for docker 
 DOCKERARGS=
 ifdef HTTP_PROXY
