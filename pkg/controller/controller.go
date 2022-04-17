@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	discoveryclient "k8s.io/client-go/discovery"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	discoveryinformers "k8s.io/client-go/informers/discovery/v1beta1"
 	"k8s.io/client-go/kubernetes"
@@ -70,12 +71,15 @@ type NetworkController struct {
 	workqueue workqueue.RateLimitingInterface
 
 	recorder record.EventRecorder
+
+	needToUpdateEndpointSlice bool
 }
 
 // NewNetworkController returns new NetworkController instance
 func NewNetworkController(
 	k8sClientSet kubernetes.Interface,
 	netAttachDefClientSet clientset.Interface,
+	disClient *discoveryclient.DiscoveryClient,
 	netAttachDefInformer informers.NetworkAttachmentDefinitionInformer,
 	serviceInformer coreinformers.ServiceInformer,
 	podInformer coreinformers.PodInformer,
@@ -93,20 +97,30 @@ func NewNetworkController(
 		workqueue.NewItemExponentialFailureRateLimiter(5*time.Millisecond, 30*time.Second),
 	)
 
+	needToUpdateEndpointSlice := false
+	err := discoveryclient.ServerSupportsVersion(disClient, schema.GroupVersion{
+		Group:   discovery.GroupName,
+		Version: "v1",
+	})
+	if err == nil {
+		needToUpdateEndpointSlice = true
+	}
+
 	networkController := &NetworkController{
-		k8sClientSet:          k8sClientSet,
-		netAttachDefClientSet: netAttachDefClientSet,
-		netAttachDefsSynced:   netAttachDefInformer.Informer().HasSynced,
-		servicesSynced:        serviceInformer.Informer().HasSynced,
-		podsSynced:            podInformer.Informer().HasSynced,
-		endpointsSynced:       endpointInformer.Informer().HasSynced,
-		serviceLister:         serviceInformer.Lister(),
-		podsLister:            podInformer.Lister(),
-		endpointsLister:       endpointInformer.Lister(),
-		endpointSliceLister:   endpointSliceInformer.Lister(),
-		endpointSlicesSynced:  endpointSliceInformer.Informer().HasSynced,
-		workqueue:             workqueue.NewNamedRateLimitingQueue(rateLimiter, "secondary_endpoints"),
-		recorder:              recorder,
+		k8sClientSet:              k8sClientSet,
+		netAttachDefClientSet:     netAttachDefClientSet,
+		netAttachDefsSynced:       netAttachDefInformer.Informer().HasSynced,
+		servicesSynced:            serviceInformer.Informer().HasSynced,
+		podsSynced:                podInformer.Informer().HasSynced,
+		endpointsSynced:           endpointInformer.Informer().HasSynced,
+		serviceLister:             serviceInformer.Lister(),
+		podsLister:                podInformer.Lister(),
+		endpointsLister:           endpointInformer.Lister(),
+		endpointSliceLister:       endpointSliceInformer.Lister(),
+		endpointSlicesSynced:      endpointSliceInformer.Informer().HasSynced,
+		workqueue:                 workqueue.NewNamedRateLimitingQueue(rateLimiter, "secondary_endpoints"),
+		recorder:                  recorder,
+		needToUpdateEndpointSlice: needToUpdateEndpointSlice,
 	}
 
 	netAttachDefInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -373,10 +387,15 @@ func (c *NetworkController) sync(key string) error {
 		c.recorder.Event(svc, corev1.EventTypeNormal, msg, "Endpoints update successful")
 	}
 
+	if !c.needToUpdateEndpointSlice {
+		klog.V(4).Info("no need to update endpointslice as k8s is not support discovery.k8s.io/v1")
+		return nil
+	}
+
 	endpointSliceUpdated := false
-	klog.V(3).Infof("trying to update endpointslice with %v", epsForEndpointSlice)
 	sortEpsEndpoints(epsForEndpointSlice)
 	sortEpsPorts(epPortsForEndpointSlice)
+	klog.V(3).Infof("trying to update endpointslice with %#v", epsForEndpointSlice)
 	retryErr = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		endpointSlices, err := endpointSlicesForServiceByREST(c.k8sClientSet, svc.Namespace, svc.Name)
 		if err != nil {
@@ -386,15 +405,19 @@ func (c *NetworkController) sync(key string) error {
 
 		for _, endpointSlice := range endpointSlices.Items {
 			if endpointSlice.AddressType == discovery.AddressTypeIPv4 {
-				klog.V(4).Infof("### Endpoint %v ---- %v", endpointSlice.Endpoints, epsForEndpointSlice)
-				klog.V(4).Infof("### EndpointPort %v ---- %v", endpointSlice.Ports, epPortsForEndpointSlice)
 				esCopy := endpointSlice.DeepCopy()
-				sortEpsEndpoints(esCopy.Endpoints)
-				sortEpsPorts(esCopy.Ports)
+				epsCopy := esCopy.Endpoints
+				portsCopy := esCopy.Ports
+				sortEpsEndpoints(epsCopy)
+				sortEpsPorts(portsCopy)
+				klog.V(4).Infof("### Endpoint copy: %#v", epsCopy)
+				klog.V(4).Infof("### Endpoint compared: %t", apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy))
+				klog.V(4).Infof("### EndpointPort length %d ---- %d", len(portsCopy), len(epPortsForEndpointSlice))
+				klog.V(4).Infof("### EndpointPort compared %t", apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy))
 				if len(esCopy.Endpoints) == len(epsForEndpointSlice) &&
-					apiequality.Semantic.DeepDerivative(epsForEndpointSlice, esCopy.Endpoints) &&
-					apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, esCopy.Ports) {
-					klog.Infof("skip to update endpointslice %s as semantic deep derivative", endpointSlice.Name)
+					apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy) &&
+					apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy) {
+					klog.Infof("skip to update endpointslice %s as semantic deep derivative", esCopy.Name)
 					continue
 				}
 				esCopy.Labels[discovery.LabelManagedBy] = controllerName
