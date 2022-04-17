@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1beta1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -30,7 +32,6 @@ import (
 	"k8s.io/kubernetes/pkg/api/v1/endpoints"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
-	utilpointer "k8s.io/utils/pointer"
 
 	"gopkg.in/intel/multus-cni.v3/types"
 
@@ -40,10 +41,11 @@ import (
 )
 
 const (
-	selectionsKey    = "k8s.v1.cni.cncf.io/networks"
-	statusesKey      = "k8s.v1.cni.cncf.io/networks-status"
-	controllerName   = "net-attach-def.panda.io"
-	svcSuffixMacvlan = "-macvlan"
+	selectionsKey            = "k8s.v1.cni.cncf.io/networks"
+	statusesKey              = "k8s.v1.cni.cncf.io/networks-status"
+	controllerName           = "net-attach-def.panda.io"
+	svcSuffixMacvlan         = "-macvlan"
+	enableEndpointSliceWatch = "PANDA_ENABLE_ENDPOINTSLICE_WATCH"
 )
 
 // NetworkController is the controller implementation for handling net-attach-def resources and other objects using them
@@ -145,14 +147,16 @@ func NewNetworkController(
 	})
 
 	/* setup handlers for endpointslice events */
-	endpointSliceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: networkController.handleEndpointSliceEvent,
-		UpdateFunc: func(old, updated interface{}) {
-			if objectChanged(old, updated) {
-				networkController.handleEndpointSliceEvent(updated)
-			}
-		},
-	})
+	if strings.EqualFold(os.Getenv(enableEndpointSliceWatch), "true") {
+		endpointSliceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: networkController.handleEndpointSliceEvent,
+			UpdateFunc: func(old, updated interface{}) {
+				if objectChanged(old, updated) {
+					networkController.handleEndpointSliceEvent(updated)
+				}
+			},
+		})
+	}
 
 	return networkController
 }
@@ -190,7 +194,7 @@ func (c *NetworkController) processNextWorkItem() bool {
 			return fmt.Errorf("error syncing '%s': %s, requeuing", key, err.Error())
 		}
 		c.workqueue.Forget(obj)
-		klog.Infof("Successfully synced '%s'", key)
+		klog.Infof("Successfully synced key '%s'", key)
 		return nil
 	}(obj)
 
@@ -256,6 +260,7 @@ func (c *NetworkController) sync(key string) error {
 
 	subsets := make([]corev1.EndpointSubset, 0)
 	epsForEndpointSlice := make([]discovery.Endpoint, 0)
+	epPortsForEndpointSlice := make([]discovery.EndpointPort, 0)
 
 	for _, pod := range pods {
 		if pod.DeletionTimestamp != nil {
@@ -267,7 +272,7 @@ func (c *NetworkController) sync(key string) error {
 		networksStatus := make([]types.NetworkStatus, 0)
 		err := json.Unmarshal([]byte(pod.Annotations[statusesKey]), &networksStatus)
 		if err != nil {
-			klog.Warningf("error reading pod %s networks status: %v", pod.Name, err)
+			klog.Warningf("skip to update for pod %s as networks status are not expected: %v", pod.Name, err)
 			continue
 		}
 		// find networks used by pod and match network annotation of the service
@@ -290,20 +295,7 @@ func (c *NetworkController) sync(key string) error {
 					}
 					addresses = append(addresses, epAddress)
 
-					esAddress := discovery.Endpoint{
-						Addresses: []string{ip},
-						Conditions: discovery.EndpointConditions{
-							Ready: utilpointer.BoolPtr(true),
-						},
-						NodeName: &pod.Spec.NodeName,
-						TargetRef: &corev1.ObjectReference{
-							Kind:            "Pod",
-							Name:            pod.GetName(),
-							Namespace:       pod.GetNamespace(),
-							ResourceVersion: pod.GetResourceVersion(),
-							UID:             pod.GetUID(),
-						},
-					}
+					esAddress := addressToEndpoint(epAddress)
 					epsForEndpointSlice = append(epsForEndpointSlice, esAddress)
 				}
 			}
@@ -339,6 +331,20 @@ func (c *NetworkController) sync(key string) error {
 			return err
 		}
 
+		// repack subsets - NOTE: too naive? additional checks needed?
+		toUpdateSubsets := endpoints.RepackSubsets(subsets)
+		// to update ports for endpointslice
+		for _, subset := range toUpdateSubsets {
+			epPorts := epPortsToEpsPorts(subset.Ports)
+			epPortsForEndpointSlice = append(epPortsForEndpointSlice, epPorts...)
+		}
+
+		// check if need to call an update
+		if apiequality.Semantic.DeepDerivative(toUpdateSubsets, result.Subsets) {
+			klog.Infof("skip to update endpoints %s as semantic deep derivative", result.Name)
+			return nil
+		}
+
 		resultCopy := result.DeepCopy()
 
 		resultCopy.SetOwnerReferences(
@@ -351,9 +357,7 @@ func (c *NetworkController) sync(key string) error {
 			},
 		)
 
-		// repack subsets - NOTE: too naive? additional checks needed?
-		resultCopy.Subsets = endpoints.RepackSubsets(subsets)
-
+		resultCopy.Subsets = toUpdateSubsets
 		updatedEndpoint, err = c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Update(context.TODO(), resultCopy, metav1.UpdateOptions{})
 		return err
 	})
@@ -370,19 +374,32 @@ func (c *NetworkController) sync(key string) error {
 	}
 
 	endpointSliceUpdated := false
-	klog.V(4).Infof("trying to update endpointslice with %v", epsForEndpointSlice)
+	klog.V(3).Infof("trying to update endpointslice with %v", epsForEndpointSlice)
+	sortEpsEndpoints(epsForEndpointSlice)
+	sortEpsPorts(epPortsForEndpointSlice)
 	retryErr = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		endpointSlices, err := endpointSlicesForService(c.k8sClientSet, svc.Namespace, svc.Name)
+		endpointSlices, err := endpointSlicesForServiceByREST(c.k8sClientSet, svc.Namespace, svc.Name)
 		if err != nil {
 			klog.Errorf("endpointslice list error: %v", err)
 			return err
 		}
 
 		for _, endpointSlice := range endpointSlices.Items {
-			esCopy := endpointSlice.DeepCopy()
-			esCopy.Labels[discovery.LabelManagedBy] = controllerName
-			esCopy.Endpoints = epsForEndpointSlice
 			if endpointSlice.AddressType == discovery.AddressTypeIPv4 {
+				klog.V(4).Infof("### Endpoint %v ---- %v", endpointSlice.Endpoints, epsForEndpointSlice)
+				klog.V(4).Infof("### EndpointPort %v ---- %v", endpointSlice.Ports, epPortsForEndpointSlice)
+				esCopy := endpointSlice.DeepCopy()
+				sortEpsEndpoints(esCopy.Endpoints)
+				sortEpsPorts(esCopy.Ports)
+				if len(esCopy.Endpoints) == len(epsForEndpointSlice) &&
+					apiequality.Semantic.DeepDerivative(epsForEndpointSlice, esCopy.Endpoints) &&
+					apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, esCopy.Ports) {
+					klog.Infof("skip to update endpointslice %s as semantic deep derivative", endpointSlice.Name)
+					continue
+				}
+				esCopy.Labels[discovery.LabelManagedBy] = controllerName
+				esCopy.Endpoints = epsForEndpointSlice
+				esCopy.Ports = epPortsForEndpointSlice
 				_, err = c.k8sClientSet.DiscoveryV1beta1().EndpointSlices(esCopy.Namespace).Update(context.TODO(),
 					esCopy,
 					metav1.UpdateOptions{})
@@ -390,9 +407,9 @@ func (c *NetworkController) sync(key string) error {
 					klog.Errorf("endpointslice update error: %v", err)
 					return err
 				}
+				c.recorder.Event(esCopy, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
+				endpointSliceUpdated = true
 			}
-			c.recorder.Event(esCopy, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
-			endpointSliceUpdated = true
 		}
 		return nil
 	})
@@ -402,6 +419,7 @@ func (c *NetworkController) sync(key string) error {
 	}
 
 	if endpointSliceUpdated {
+		klog.V(3).Info("endpointslice updated successfully")
 		c.recorder.Event(svc, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
 	}
 
