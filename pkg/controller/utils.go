@@ -209,6 +209,19 @@ func sortEpsPorts(ports []discovery.EndpointPort) {
 	})
 }
 
+func filterEpsList(epsList *discovery.EndpointSliceList) []discovery.EndpointSlice {
+	result := []discovery.EndpointSlice{}
+
+	for _, eps := range epsList.Items {
+		if eps.AddressType != discovery.AddressTypeIPv4 || eps.DeletionTimestamp != nil {
+			continue
+		}
+		result = append(result, eps)
+	}
+
+	return result
+}
+
 func endpointSlicesForServiceByREST(k8sClientSet kubernetes.Interface, namespace, name string) (*discovery.EndpointSliceList, error) {
 	esLabelSelector := labels.Set(map[string]string{
 		discovery.LabelServiceName: name,

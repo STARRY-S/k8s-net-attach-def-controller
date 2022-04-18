@@ -404,35 +404,47 @@ func (c *NetworkController) sync(key string) error {
 			return err
 		}
 
-		for _, endpointSlice := range endpointSlices.Items {
-			if endpointSlice.AddressType == discovery.AddressTypeIPv4 {
-				esCopy := endpointSlice.DeepCopy()
-				epsCopy := esCopy.Endpoints
-				portsCopy := esCopy.Ports
-				sortEpsEndpoints(epsCopy)
-				sortEpsPorts(portsCopy)
-				klog.V(4).Infof("### Endpoint copy: %#v", epsCopy)
-				klog.V(4).Infof("### Endpoint compared: %t", apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy))
-				klog.V(4).Infof("### EndpointPort length %d ---- %d", len(portsCopy), len(epPortsForEndpointSlice))
-				klog.V(4).Infof("### EndpointPort compared %t", apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy))
-				if len(esCopy.Endpoints) == len(epsForEndpointSlice) &&
-					apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy) &&
-					apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy) {
-					klog.Infof("skip to update endpointslice %s as semantic deep derivative", esCopy.Name)
+		toActionList := filterEpsList(endpointSlices)
+
+		for _, endpointSlice := range toActionList {
+			esCopy := endpointSlice.DeepCopy()
+			epsCopy := esCopy.Endpoints
+			portsCopy := esCopy.Ports
+			sortEpsEndpoints(epsCopy)
+			sortEpsPorts(portsCopy)
+			klog.V(4).Infof("### Endpoint copy: %#v", epsCopy)
+			klog.V(4).Infof("### Endpoint compared: %t", apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy))
+			klog.V(4).Infof("### EndpointPort length %d ---- %d", len(portsCopy), len(epPortsForEndpointSlice))
+			klog.V(4).Infof("### EndpointPort compared %t", apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy))
+			if len(esCopy.Endpoints) == len(epsForEndpointSlice) &&
+				apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy) &&
+				apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy) {
+				klog.Infof("skip to update endpointslice %s as semantic deep derivative", esCopy.Name)
+				continue
+			}
+			esCopy.Labels[discovery.LabelManagedBy] = controllerName
+			esCopy.Endpoints = epsForEndpointSlice
+			esCopy.Ports = epPortsForEndpointSlice
+			_, err = c.k8sClientSet.DiscoveryV1().EndpointSlices(esCopy.Namespace).Update(context.TODO(),
+				esCopy,
+				metav1.UpdateOptions{})
+			if err != nil {
+				klog.Errorf("endpointslice update error: %v", err)
+				return err
+			}
+			c.recorder.Event(esCopy, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
+			endpointSliceUpdated = true
+		}
+
+		if len(toActionList) > 1 {
+			for _, endpointSlice := range toActionList[1:] {
+				err := c.k8sClientSet.DiscoveryV1().EndpointSlices(endpointSlice.Namespace).Delete(context.TODO(),
+					endpointSlice.Name, metav1.DeleteOptions{})
+				if err != nil {
+					klog.Errorf("endpointslice delete error: %v", err)
 					continue
 				}
-				esCopy.Labels[discovery.LabelManagedBy] = controllerName
-				esCopy.Endpoints = epsForEndpointSlice
-				esCopy.Ports = epPortsForEndpointSlice
-				_, err = c.k8sClientSet.DiscoveryV1().EndpointSlices(esCopy.Namespace).Update(context.TODO(),
-					esCopy,
-					metav1.UpdateOptions{})
-				if err != nil {
-					klog.Errorf("endpointslice update error: %v", err)
-					return err
-				}
-				c.recorder.Event(esCopy, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
-				endpointSliceUpdated = true
+				klog.Infof("deleted endpointslice %s", endpointSlice.Name)
 			}
 		}
 		return nil
