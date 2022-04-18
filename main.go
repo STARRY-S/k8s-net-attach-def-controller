@@ -77,7 +77,7 @@ func main() {
 		k8sInformerFactory.Core().V1().Services(),
 		k8sInformerFactory.Core().V1().Pods(),
 		k8sInformerFactory.Core().V1().Endpoints(),
-		k8sInformerFactory.Discovery().V1beta1().EndpointSlices(),
+		k8sInformerFactory.Discovery().V1().EndpointSlices(),
 	)
 
 	netAttachDefInformerFactory.Start(stopChan)

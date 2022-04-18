@@ -10,11 +10,11 @@ import (
 	"github.com/pkg/errors"
 
 	corev1 "k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1beta1"
+	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
-	discoverylisters "k8s.io/client-go/listers/discovery/v1beta1"
+	discoverylisters "k8s.io/client-go/listers/discovery/v1"
 	"k8s.io/klog/v2"
 	utilpointer "k8s.io/utils/pointer"
 
@@ -217,7 +217,7 @@ func endpointSlicesForServiceByREST(k8sClientSet kubernetes.Interface, namespace
 	listOpt := metav1.ListOptions{
 		LabelSelector: esLabelSelector.String(),
 	}
-	return k8sClientSet.DiscoveryV1beta1().EndpointSlices(namespace).List(context.TODO(), listOpt)
+	return k8sClientSet.DiscoveryV1().EndpointSlices(namespace).List(context.TODO(), listOpt)
 }
 
 func endpointSlicesForServiceByLister(endpointSliceLister discoverylisters.EndpointSliceLister, namespace, name string) ([]*discovery.EndpointSlice, error) {

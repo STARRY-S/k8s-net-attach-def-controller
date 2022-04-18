@@ -9,7 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1beta1"
+	discovery "k8s.io/api/discovery/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,12 +19,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	discoveryclient "k8s.io/client-go/discovery"
 	coreinformers "k8s.io/client-go/informers/core/v1"
-	discoveryinformers "k8s.io/client-go/informers/discovery/v1beta1"
+	discoveryinformers "k8s.io/client-go/informers/discovery/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
-	discoverylisters "k8s.io/client-go/listers/discovery/v1beta1"
+	discoverylisters "k8s.io/client-go/listers/discovery/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
@@ -98,10 +98,7 @@ func NewNetworkController(
 	)
 
 	needToUpdateEndpointSlice := false
-	err := discoveryclient.ServerSupportsVersion(disClient, schema.GroupVersion{
-		Group:   discovery.GroupName,
-		Version: "v1",
-	})
+	err := discoveryclient.ServerSupportsVersion(disClient, discovery.SchemeGroupVersion)
 	if err == nil {
 		needToUpdateEndpointSlice = true
 	}
@@ -428,7 +425,7 @@ func (c *NetworkController) sync(key string) error {
 				esCopy.Labels[discovery.LabelManagedBy] = controllerName
 				esCopy.Endpoints = epsForEndpointSlice
 				esCopy.Ports = epPortsForEndpointSlice
-				_, err = c.k8sClientSet.DiscoveryV1beta1().EndpointSlices(esCopy.Namespace).Update(context.TODO(),
+				_, err = c.k8sClientSet.DiscoveryV1().EndpointSlices(esCopy.Namespace).Update(context.TODO(),
 					esCopy,
 					metav1.UpdateOptions{})
 				if err != nil {
