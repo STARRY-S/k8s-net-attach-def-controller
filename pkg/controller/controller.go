@@ -371,6 +371,11 @@ func (c *NetworkController) sync(key string) error {
 			},
 		)
 
+		if resultCopy.Labels == nil {
+			resultCopy.Labels = map[string]string{}
+		}
+		resultCopy.Labels[discovery.LabelSkipMirror] = "true"
+
 		resultCopy.Subsets = toUpdateSubsets
 		updatedEndpoint, err = c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Update(context.TODO(), resultCopy, metav1.UpdateOptions{})
 		return err
