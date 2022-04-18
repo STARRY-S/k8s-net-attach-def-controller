@@ -18,8 +18,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	discoveryclient "k8s.io/client-go/discovery"
-	coreinformers "k8s.io/client-go/informers/core/v1"
-	discoveryinformers "k8s.io/client-go/informers/discovery/v1"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -38,7 +37,7 @@ import (
 
 	netattachdef "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	clientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
-	informers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions/k8s.cni.cncf.io/v1"
+	nadinformers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions/k8s.cni.cncf.io/v1"
 )
 
 const (
@@ -80,11 +79,12 @@ func NewNetworkController(
 	k8sClientSet kubernetes.Interface,
 	netAttachDefClientSet clientset.Interface,
 	disClient *discoveryclient.DiscoveryClient,
-	netAttachDefInformer informers.NetworkAttachmentDefinitionInformer,
-	serviceInformer coreinformers.ServiceInformer,
-	podInformer coreinformers.PodInformer,
-	endpointInformer coreinformers.EndpointsInformer,
-	endpointSliceInformer discoveryinformers.EndpointSliceInformer) *NetworkController {
+	netAttachDefInformer nadinformers.NetworkAttachmentDefinitionInformer,
+	k8sInformerFactory informers.SharedInformerFactory) *NetworkController {
+
+	serviceInformer := k8sInformerFactory.Core().V1().Services()
+	podInformer := k8sInformerFactory.Core().V1().Pods()
+	endpointInformer := k8sInformerFactory.Core().V1().Endpoints()
 
 	klog.V(3).Info("creating event broadcaster")
 	eventBroadcaster := record.NewBroadcaster()
@@ -97,79 +97,78 @@ func NewNetworkController(
 		workqueue.NewItemExponentialFailureRateLimiter(5*time.Millisecond, 30*time.Second),
 	)
 
-	needToUpdateEndpointSlice := false
-	err := discoveryclient.ServerSupportsVersion(disClient, discovery.SchemeGroupVersion)
-	if err == nil {
-		needToUpdateEndpointSlice = true
+	nc := &NetworkController{
+		k8sClientSet:          k8sClientSet,
+		netAttachDefClientSet: netAttachDefClientSet,
+		netAttachDefsSynced:   netAttachDefInformer.Informer().HasSynced,
+		servicesSynced:        serviceInformer.Informer().HasSynced,
+		podsSynced:            podInformer.Informer().HasSynced,
+		endpointsSynced:       endpointInformer.Informer().HasSynced,
+		serviceLister:         serviceInformer.Lister(),
+		podsLister:            podInformer.Lister(),
+		endpointsLister:       endpointInformer.Lister(),
+		workqueue:             workqueue.NewNamedRateLimitingQueue(rateLimiter, "secondary_endpoints"),
+		recorder:              recorder,
 	}
 
-	networkController := &NetworkController{
-		k8sClientSet:              k8sClientSet,
-		netAttachDefClientSet:     netAttachDefClientSet,
-		netAttachDefsSynced:       netAttachDefInformer.Informer().HasSynced,
-		servicesSynced:            serviceInformer.Informer().HasSynced,
-		podsSynced:                podInformer.Informer().HasSynced,
-		endpointsSynced:           endpointInformer.Informer().HasSynced,
-		serviceLister:             serviceInformer.Lister(),
-		podsLister:                podInformer.Lister(),
-		endpointsLister:           endpointInformer.Lister(),
-		endpointSliceLister:       endpointSliceInformer.Lister(),
-		endpointSlicesSynced:      endpointSliceInformer.Informer().HasSynced,
-		workqueue:                 workqueue.NewNamedRateLimitingQueue(rateLimiter, "secondary_endpoints"),
-		recorder:                  recorder,
-		needToUpdateEndpointSlice: needToUpdateEndpointSlice,
+	err := discoveryclient.ServerSupportsVersion(disClient, discovery.SchemeGroupVersion)
+	if err == nil {
+		endpointSliceInformer := k8sInformerFactory.Discovery().V1().EndpointSlices()
+		nc.endpointSliceLister = endpointSliceInformer.Lister()
+		nc.endpointSlicesSynced = endpointSliceInformer.Informer().HasSynced
+		nc.needToUpdateEndpointSlice = true
+
+		/* setup handlers for endpointslice events */
+		if strings.EqualFold(os.Getenv(enableEndpointSliceWatch), "true") {
+			endpointSliceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+				AddFunc: nc.handleEndpointSliceEvent,
+				UpdateFunc: func(old, updated interface{}) {
+					if objectChanged(old, updated) {
+						nc.handleEndpointSliceEvent(updated)
+					}
+				},
+			})
+		}
 	}
 
 	netAttachDefInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		DeleteFunc: networkController.handleNetAttachDefDeleteEvent,
+		DeleteFunc: nc.handleNetAttachDefDeleteEvent,
 	})
 
 	/* setup handlers for endpoints events */
 	endpointInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: networkController.handleEndpointEvent,
+		AddFunc: nc.handleEndpointEvent,
 		UpdateFunc: func(old, updated interface{}) {
 			if objectChanged(old, updated) {
-				networkController.handleEndpointEvent(updated)
+				nc.handleEndpointEvent(updated)
 			}
 		},
-		DeleteFunc: networkController.handleEndpointEvent,
+		DeleteFunc: nc.handleEndpointEvent,
 	})
 
 	/* setup handlers for services events */
 	serviceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: networkController.handleServiceEvent,
+		AddFunc: nc.handleServiceEvent,
 		UpdateFunc: func(old, updated interface{}) {
 			if objectChanged(old, updated) || networkAnnotationsChanged(old, updated) {
-				networkController.handleServiceEvent(updated)
+				nc.handleServiceEvent(updated)
 			}
 		},
-		DeleteFunc: networkController.handleServiceEvent,
+		DeleteFunc: nc.handleServiceEvent,
 	})
 
 	/* setup handlers for pods events */
 	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: networkController.handlePodEvent,
+		AddFunc: nc.handlePodEvent,
 		UpdateFunc: func(old, updated interface{}) {
 			if objectChanged(old, updated) {
-				networkController.handlePodEvent(updated)
+				nc.handlePodEvent(updated)
 			}
 		},
-		DeleteFunc: networkController.handlePodEvent,
+		DeleteFunc: nc.handlePodEvent,
 	})
 
-	/* setup handlers for endpointslice events */
-	if strings.EqualFold(os.Getenv(enableEndpointSliceWatch), "true") {
-		endpointSliceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc: networkController.handleEndpointSliceEvent,
-			UpdateFunc: func(old, updated interface{}) {
-				if objectChanged(old, updated) {
-					networkController.handleEndpointSliceEvent(updated)
-				}
-			},
-		})
-	}
-
-	return networkController
+	return nc
 }
 
 func (c *NetworkController) worker() {
@@ -568,12 +567,16 @@ func (c *NetworkController) Run(workers int, stopChan <-chan struct{}) {
 
 	// Wait for the caches to be synced before starting workers
 	klog.Info("Waiting for informer caches to sync")
-	if ok := cache.WaitForCacheSync(stopChan,
+	cacheSyncs := []cache.InformerSynced{
 		c.netAttachDefsSynced,
 		c.endpointsSynced,
-		c.endpointSlicesSynced,
 		c.servicesSynced,
-		c.podsSynced); !ok {
+		c.podsSynced,
+	}
+	if c.endpointSlicesSynced != nil {
+		cacheSyncs = append(cacheSyncs, c.endpointSlicesSynced)
+	}
+	if ok := cache.WaitForCacheSync(stopChan, cacheSyncs...); !ok {
 		klog.Fatalf("failed waiting for caches to sync")
 	}
 	klog.Info("Starting workers")

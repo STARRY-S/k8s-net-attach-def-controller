@@ -74,10 +74,7 @@ func main() {
 		netAttachDefClientSet,
 		disClient,
 		netAttachDefInformerFactory.K8sCniCncfIo().V1().NetworkAttachmentDefinitions(),
-		k8sInformerFactory.Core().V1().Services(),
-		k8sInformerFactory.Core().V1().Pods(),
-		k8sInformerFactory.Core().V1().Endpoints(),
-		k8sInformerFactory.Discovery().V1().EndpointSlices(),
+		k8sInformerFactory,
 	)
 
 	netAttachDefInformerFactory.Start(stopChan)
