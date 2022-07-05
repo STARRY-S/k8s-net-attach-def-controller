@@ -12,10 +12,7 @@ RUN apk add --update make && \
 
 RUN ls -al /usr/src/k8s-net-attach-def-controller
 
-FROM alpine:3.14
+FROM registry.suse.com/bci/bci-base:15.4
 COPY --from=builder /usr/src/k8s-net-attach-def-controller/build/k8s-net-attach-def-controller /usr/bin/
-WORKDIR /
-
-LABEL io.k8s.display-name="Network Attachment Definitions Controller"
 
 ENTRYPOINT ["/usr/bin/k8s-net-attach-def-controller"]
