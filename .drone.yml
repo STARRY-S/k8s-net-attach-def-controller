@@ -24,7 +24,7 @@ steps:
   pull: default
   image: plugins/docker
   settings:
-    dockerfile: Dockerfile
+    dockerfile: package/Dockerfile
     username:
       from_secret: docker_username
     password:
@@ -75,7 +75,7 @@ steps:
   settings:
     build_args:
     - ARCH=arm64
-    dockerfile: Dockerfile
+    dockerfile: package/Dockerfile
     username:
       from_secret: docker_username
     password:
