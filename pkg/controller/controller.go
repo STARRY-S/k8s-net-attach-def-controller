@@ -33,7 +33,7 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
 
-	"gopkg.in/intel/multus-cni.v3/types"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/types"
 
 	netattachdef "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	clientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
