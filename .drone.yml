@@ -7,6 +7,19 @@ platform:
   arch: amd64
 
 steps:
+- name: build
+  pull: default
+  image: rancher/dapper:v0.5.8
+  commands:
+  - dapper ci
+  privileged: true
+  volumes:
+  - name: docker
+    path: /var/run/docker.sock
+  when:
+    event:
+    - tag
+
 - name: docker-publish
   pull: default
   image: plugins/docker
@@ -43,6 +56,19 @@ platform:
   arch: arm64
 
 steps:
+- name: build
+  pull: default
+  image: rancher/dapper:v0.5.8
+  commands:
+  - dapper ci
+  privileged: true
+  volumes:
+  - name: docker
+    path: /var/run/docker.sock
+  when:
+    event:
+    - tag
+
 - name: docker-publish
   pull: default
   image: plugins/docker

@@ -1,0 +1,13 @@
+#!/bin/bash
+set -e
+
+source $(dirname $0)/version
+
+cd $(dirname $0)/..
+
+if [ ! -e bin/k8s-net-attach-def-controller ]; then
+    ./scripts/build
+fi
+
+docker build --build-arg ARCH=${ARCH} -f package/Dockerfile -t cnrancher/k8s-net-attach-def-controller .
+
