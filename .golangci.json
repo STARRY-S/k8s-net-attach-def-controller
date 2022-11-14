@@ -21,7 +21,7 @@
     "run": {
         "skip-dirs": [
             "vendor",
-            "tests",
+            "tests"
         ],
         "tests": false,
         "timeout": "10m"

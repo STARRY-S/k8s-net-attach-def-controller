@@ -33,9 +33,8 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
 
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/types"
-
 	netattachdef "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	nettypes "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	clientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
 	nadinformers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions/k8s.cni.cncf.io/v1"
 )
@@ -279,7 +278,7 @@ func (c *NetworkController) sync(key string) error {
 		addresses := make([]corev1.EndpointAddress, 0)
 		ports := make([]corev1.EndpointPort, 0)
 
-		networksStatus := make([]types.NetworkStatus, 0)
+		networksStatus := make([]nettypes.NetworkStatus, 0)
 		err := json.Unmarshal([]byte(pod.Annotations[statusesKey]), &networksStatus)
 		if err != nil {
 			klog.Warningf("skip to update for pod %s as networks status are not expected: %v", pod.Name, err)
