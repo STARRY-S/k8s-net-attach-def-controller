@@ -34,7 +34,7 @@ func networkAnnotationsChanged(previous, current interface{}) bool {
 }
 
 // FIXME
-func networkStatusChanged(previous, current interface{}) bool {
+func networkStatusChanged(_, _ interface{}) bool {
 	return true
 }
 

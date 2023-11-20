@@ -172,6 +172,7 @@ func NewNetworkController(
 
 func (c *NetworkController) worker() {
 	for c.processNextWorkItem() {
+		continue
 	}
 }
 
