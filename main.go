@@ -10,12 +10,12 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
-	"k8s.io/sample-controller/pkg/signals"
 
 	clientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
 	sharedInformers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions"
 
 	"github.com/k8snetworkplumbingwg/k8s-net-attach-def-controller/pkg/controller"
+	"github.com/k8snetworkplumbingwg/k8s-net-attach-def-controller/pkg/signals"
 )
 
 var (
