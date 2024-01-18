@@ -355,8 +355,10 @@ func (c *NetworkController) handleEndpointEvent(obj interface{}) {
 	svc, err := c.serviceLister.Services(ep.GetNamespace()).Get(ep.GetName())
 	if err != nil {
 		// errors are returned for service-less endpoints such as kube-scheduler and kube-controller-manager
+		klog.Errorf("XXXX failed to get service: %v", err)
 		return
 	}
+	klog.Infof("XXXX handleEndpointEvent get svc: %++v", obj)
 
 	c.handleServiceEvent(svc)
 }
