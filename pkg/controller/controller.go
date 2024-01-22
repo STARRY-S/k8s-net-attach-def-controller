@@ -584,7 +584,8 @@ func (c *NetworkController) needToSyncService(serviceName string) bool {
 	// If k8s version <= 1.20 and does not support discover.k8s.io/v1,
 	// Sync the macvlan service and rancher created ingress services.
 	// This controller will update the ingress endpoints directly.
-	return strings.HasSuffix(serviceName, svcSuffixMacvlan) || strings.HasPrefix(serviceName, svcPrefixIngress)
+	// return strings.HasSuffix(serviceName, svcSuffixMacvlan) || strings.HasPrefix(serviceName, svcPrefixIngress)
+	return true
 }
 
 // Run will set up the event handlers for types we are interested in, as well
