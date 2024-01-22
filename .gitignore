@@ -7,3 +7,5 @@
 /trash.lock
 /.idea
 /.gopath
+
+/k8s-net-attach-def-controller

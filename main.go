@@ -4,7 +4,6 @@ import (
 	"flag"
 	"time"
 
-	discoveryclient "k8s.io/client-go/discovery"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -64,15 +63,12 @@ func main() {
 		klog.Fatalf("error creating net-attach-def clientset: %s", err.Error())
 	}
 
-	disClient := discoveryclient.NewDiscoveryClientForConfigOrDie(cfg)
-
 	netAttachDefInformerFactory := sharedInformers.NewSharedInformerFactory(netAttachDefClientSet, syncPeriod)
 	k8sInformerFactory := informers.NewSharedInformerFactory(k8sClientSet, syncPeriod)
 
 	networkController := controller.NewNetworkController(
 		k8sClientSet,
 		netAttachDefClientSet,
-		disClient,
 		netAttachDefInformerFactory.K8sCniCncfIo().V1().NetworkAttachmentDefinitions(),
 		k8sInformerFactory,
 	)

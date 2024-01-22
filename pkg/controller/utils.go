@@ -1,22 +1,14 @@
 package controller
 
 import (
-	"context"
 	"encoding/json"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/pkg/errors"
 
-	corev1 "k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/kubernetes"
-	discoverylisters "k8s.io/client-go/listers/discovery/v1"
 	"k8s.io/klog/v2"
-	utilpointer "k8s.io/utils/pointer"
 
 	"gopkg.in/intel/multus-cni.v3/types"
 )
@@ -158,85 +150,4 @@ func parsePodNetworkSelectionElement(selection, defaultNamespace string) (*types
 	}
 
 	return networkSelectionElement, nil
-}
-
-// epPortsToEpsPorts converts ports from an Endpoints resource to ports for an
-// EndpointSlice resource.
-func epPortsToEpsPorts(epPorts []corev1.EndpointPort) []discovery.EndpointPort {
-	epsPorts := []discovery.EndpointPort{}
-	for _, epPort := range epPorts {
-		epp := epPort.DeepCopy()
-		epsPorts = append(epsPorts, discovery.EndpointPort{
-			Name:        &epp.Name,
-			Port:        &epp.Port,
-			Protocol:    &epp.Protocol,
-			AppProtocol: epp.AppProtocol,
-		})
-	}
-	return epsPorts
-}
-
-// addressToEndpoint converts an address from an Endpoints resource to an
-// EndpointSlice endpoint.
-func addressToEndpoint(address corev1.EndpointAddress) discovery.Endpoint {
-	endpoint := discovery.Endpoint{
-		Addresses: []string{address.IP},
-		Conditions: discovery.EndpointConditions{
-			Ready: utilpointer.BoolPtr(true),
-		},
-		TargetRef: address.TargetRef,
-	}
-
-	if address.NodeName != nil {
-		endpoint.NodeName = address.NodeName
-	}
-	if address.Hostname != "" {
-		endpoint.Hostname = &address.Hostname
-	}
-
-	return endpoint
-}
-
-func sortEpsEndpoints(eps []discovery.Endpoint) {
-	sort.Slice(eps, func(i, j int) bool {
-		return strings.Compare(eps[i].TargetRef.Name, eps[j].TargetRef.Name) > 0
-	})
-}
-
-func sortEpsPorts(ports []discovery.EndpointPort) {
-	sort.Slice(ports, func(i, j int) bool {
-		return strings.Compare(*ports[i].Name, *ports[j].Name) > 0
-	})
-}
-
-func filterEpsList(epsList *discovery.EndpointSliceList) []discovery.EndpointSlice {
-	result := []discovery.EndpointSlice{}
-
-	for _, eps := range epsList.Items {
-		if eps.AddressType != discovery.AddressTypeIPv4 || eps.DeletionTimestamp != nil {
-			continue
-		}
-		result = append(result, eps)
-	}
-
-	return result
-}
-
-func endpointSlicesForServiceByREST(k8sClientSet kubernetes.Interface, namespace, name string) (*discovery.EndpointSliceList, error) {
-	esLabelSelector := labels.Set(map[string]string{
-		discovery.LabelServiceName: name,
-	}).AsSelectorPreValidated()
-
-	listOpt := metav1.ListOptions{
-		LabelSelector: esLabelSelector.String(),
-	}
-	return k8sClientSet.DiscoveryV1().EndpointSlices(namespace).List(context.TODO(), listOpt)
-}
-
-func endpointSlicesForServiceByLister(endpointSliceLister discoverylisters.EndpointSliceLister, namespace, name string) ([]*discovery.EndpointSlice, error) {
-	esLabelSelector := labels.Set(map[string]string{
-		discovery.LabelServiceName: name,
-		discovery.LabelManagedBy:   controllerName,
-	}).AsSelectorPreValidated()
-	return endpointSliceLister.EndpointSlices(namespace).List(esLabelSelector)
 }

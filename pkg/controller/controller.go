@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,13 +15,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	discoveryclient "k8s.io/client-go/discovery"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
-	discoverylisters "k8s.io/client-go/listers/discovery/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
@@ -41,11 +37,11 @@ import (
 )
 
 const (
-	selectionsKey            = "k8s.v1.cni.cncf.io/networks"
-	statusesKey              = "k8s.v1.cni.cncf.io/networks-status"
-	controllerName           = "net-attach-def.panda.io"
-	svcSuffixMacvlan         = "-macvlan"
-	enableEndpointSliceWatch = "PANDA_ENABLE_ENDPOINTSLICE_WATCH"
+	selectionsKey    = "k8s.v1.cni.cncf.io/networks"
+	statusesKey      = "k8s.v1.cni.cncf.io/networks-status"
+	controllerName   = "net-attach-def.panda.io"
+	svcSuffixMacvlan = "-macvlan"
+	svcPrefixIngress = "ingress-"
 )
 
 // NetworkController is the controller implementation for handling net-attach-def resources and other objects using them
@@ -64,21 +60,15 @@ type NetworkController struct {
 	endpointsLister corelisters.EndpointsLister
 	endpointsSynced cache.InformerSynced
 
-	endpointSliceLister  discoverylisters.EndpointSliceLister
-	endpointSlicesSynced cache.InformerSynced
-
 	workqueue workqueue.RateLimitingInterface
 
 	recorder record.EventRecorder
-
-	needToUpdateEndpointSlice bool
 }
 
 // NewNetworkController returns new NetworkController instance
 func NewNetworkController(
 	k8sClientSet kubernetes.Interface,
 	netAttachDefClientSet clientset.Interface,
-	disClient *discoveryclient.DiscoveryClient,
 	netAttachDefInformer nadinformers.NetworkAttachmentDefinitionInformer,
 	k8sInformerFactory informers.SharedInformerFactory) *NetworkController {
 
@@ -109,26 +99,6 @@ func NewNetworkController(
 		endpointsLister:       endpointInformer.Lister(),
 		workqueue:             workqueue.NewNamedRateLimitingQueue(rateLimiter, "secondary_endpoints"),
 		recorder:              recorder,
-	}
-
-	err := discoveryclient.ServerSupportsVersion(disClient, discovery.SchemeGroupVersion)
-	if err == nil {
-		endpointSliceInformer := k8sInformerFactory.Discovery().V1().EndpointSlices()
-		nc.endpointSliceLister = endpointSliceInformer.Lister()
-		nc.endpointSlicesSynced = endpointSliceInformer.Informer().HasSynced
-		nc.needToUpdateEndpointSlice = true
-
-		/* setup handlers for endpointslice events */
-		if strings.EqualFold(os.Getenv(enableEndpointSliceWatch), "true") {
-			endpointSliceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-				AddFunc: nc.handleEndpointSliceEvent,
-				UpdateFunc: func(old, updated interface{}) {
-					if objectChanged(old, updated) {
-						nc.handleEndpointSliceEvent(updated)
-					}
-				},
-			})
-		}
 	}
 
 	netAttachDefInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -194,8 +164,14 @@ func (c *NetworkController) processNextWorkItem() bool {
 			return nil
 		}
 
-		if !strings.HasSuffix(key, svcSuffixMacvlan) {
-			klog.V(4).Infof("ignore svc %s as has no %s suffic", key, svcSuffixMacvlan)
+		_, name, err := cache.SplitMetaNamespaceKey(key)
+		if err != nil {
+			klog.Errorf("failed to split key %q: %v", key, err)
+			return err
+		}
+		if !(strings.HasSuffix(name, svcSuffixMacvlan) || strings.HasPrefix(name, svcPrefixIngress)) {
+			klog.V(4).Infof("ignore svc %q as has no %q suffic and %q prefix",
+				key, svcSuffixMacvlan, svcPrefixIngress)
 			return nil
 		}
 
@@ -237,6 +213,7 @@ func (c *NetworkController) sync(key string) error {
 	// read network annotations from the service
 	annotations := getNetworkAnnotations(svc)
 	if len(annotations) == 0 {
+		klog.V(3).Infof("skip sync %q: no annotations found", key)
 		return nil
 	}
 	klog.V(3).Infof("service network annotation found: %v", annotations)
@@ -269,8 +246,6 @@ func (c *NetworkController) sync(key string) error {
 	}
 
 	subsets := make([]corev1.EndpointSubset, 0)
-	epsForEndpointSlice := make([]discovery.Endpoint, 0)
-	epPortsForEndpointSlice := make([]discovery.EndpointPort, 0)
 
 	for _, pod := range pods {
 		if pod.DeletionTimestamp != nil {
@@ -280,6 +255,8 @@ func (c *NetworkController) sync(key string) error {
 		ports := make([]corev1.EndpointPort, 0)
 
 		networksStatus := make([]types.NetworkStatus, 0)
+		klog.Infof("XXXXX pod annotation %q: ", statusesKey)
+		klog.Infof("%s", pod.Annotations[statusesKey])
 		err := json.Unmarshal([]byte(pod.Annotations[statusesKey]), &networksStatus)
 		if err != nil {
 			klog.Warningf("skip to update for pod %s as networks status are not expected: %v", pod.Name, err)
@@ -304,9 +281,6 @@ func (c *NetworkController) sync(key string) error {
 						},
 					}
 					addresses = append(addresses, epAddress)
-
-					esAddress := addressToEndpoint(epAddress)
-					epsForEndpointSlice = append(epsForEndpointSlice, esAddress)
 				}
 			}
 		}
@@ -332,7 +306,6 @@ func (c *NetworkController) sync(key string) error {
 		subsets = append(subsets, subset)
 	}
 
-	var updatedEndpoint *corev1.Endpoints
 	// update endpoints resource
 	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		result, err := c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Get(context.TODO(), ep.Name, metav1.GetOptions{})
@@ -343,11 +316,6 @@ func (c *NetworkController) sync(key string) error {
 
 		// repack subsets - NOTE: too naive? additional checks needed?
 		toUpdateSubsets := endpoints.RepackSubsets(subsets)
-		// to update ports for endpointslice
-		for _, subset := range toUpdateSubsets {
-			epPorts := epPortsToEpsPorts(subset.Ports)
-			epPortsForEndpointSlice = append(epPortsForEndpointSlice, epPorts...)
-		}
 
 		// check if need to call an update
 		if apiequality.Semantic.DeepDerivative(toUpdateSubsets, result.Subsets) {
@@ -370,10 +338,10 @@ func (c *NetworkController) sync(key string) error {
 		if resultCopy.Labels == nil {
 			resultCopy.Labels = map[string]string{}
 		}
-		resultCopy.Labels[discovery.LabelSkipMirror] = "true"
+		// resultCopy.Labels[discovery.LabelSkipMirror] = "true"
 
 		resultCopy.Subsets = toUpdateSubsets
-		updatedEndpoint, err = c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Update(context.TODO(), resultCopy, metav1.UpdateOptions{})
+		_, err = c.k8sClientSet.CoreV1().Endpoints(ep.Namespace).Update(context.TODO(), resultCopy, metav1.UpdateOptions{})
 		return err
 	})
 	if retryErr != nil {
@@ -382,82 +350,78 @@ func (c *NetworkController) sync(key string) error {
 	}
 
 	msg := fmt.Sprintf("Updated to use network %s", annotations)
-	if updatedEndpoint != nil {
-		klog.V(3).Info("endpoint updated successfully")
-		c.recorder.Event(ep, corev1.EventTypeNormal, msg, "Endpoints update successful")
-		c.recorder.Event(svc, corev1.EventTypeNormal, msg, "Endpoints update successful")
-	}
+	klog.Infof("endpoint updated successfully")
+	c.recorder.Event(ep, corev1.EventTypeNormal, msg, "Endpoints update successful")
+	c.recorder.Event(svc, corev1.EventTypeNormal, msg, "Endpoints update successful")
 
-	if !c.needToUpdateEndpointSlice {
-		klog.V(4).Info("no need to update endpointslice as k8s is not support discovery.k8s.io/v1")
-		return nil
-	}
+	// if !c.needToUpdateEndpointSlice {
+	// 	klog.Info("no need to update endpointslice as k8s is not support discovery.k8s.io/v1")
+	// 	return nil
+	// }
 
-	endpointSliceUpdated := false
-	sortEpsEndpoints(epsForEndpointSlice)
-	sortEpsPorts(epPortsForEndpointSlice)
-	klog.V(3).Infof("trying to update endpointslice with %#v", epsForEndpointSlice)
-	retryErr = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		endpointSlices, err := endpointSlicesForServiceByREST(c.k8sClientSet, svc.Namespace, svc.Name)
-		if err != nil {
-			klog.Errorf("endpointslice list error: %v", err)
-			return err
-		}
+	// endpointSliceUpdated := false
+	// klog.V(3).Infof("trying to update endpointslice with %#v", epsForEndpointSlice)
+	// retryErr = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	// 	endpointSlices, err := endpointSlicesForServiceByREST(c.k8sClientSet, svc.Namespace, svc.Name)
+	// 	if err != nil {
+	// 		klog.Errorf("endpointslice list error: %v", err)
+	// 		return err
+	// 	}
 
-		toActionList := filterEpsList(endpointSlices)
+	// 	toActionList := filterEpsList(endpointSlices)
 
-		for _, endpointSlice := range toActionList {
-			esCopy := endpointSlice.DeepCopy()
-			epsCopy := esCopy.Endpoints
-			portsCopy := esCopy.Ports
-			sortEpsEndpoints(epsCopy)
-			sortEpsPorts(portsCopy)
-			klog.V(4).Infof("### Endpoint copy: %#v", epsCopy)
-			klog.V(4).Infof("### Endpoint compared: %t", apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy))
-			klog.V(4).Infof("### EndpointPort length %d ---- %d", len(portsCopy), len(epPortsForEndpointSlice))
-			klog.V(4).Infof("### EndpointPort compared %t", apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy))
-			if len(esCopy.Endpoints) == len(epsForEndpointSlice) &&
-				apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy) &&
-				apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy) {
-				klog.Infof("skip to update endpointslice %s as semantic deep derivative", esCopy.Name)
-				continue
-			}
-			esCopy.Labels[discovery.LabelManagedBy] = controllerName
-			esCopy.Endpoints = epsForEndpointSlice
-			esCopy.Ports = epPortsForEndpointSlice
-			_, err = c.k8sClientSet.DiscoveryV1().EndpointSlices(esCopy.Namespace).Update(context.TODO(),
-				esCopy,
-				metav1.UpdateOptions{})
-			if err != nil {
-				klog.Errorf("endpointslice update error: %v", err)
-				return err
-			}
-			c.recorder.Event(esCopy, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
-			endpointSliceUpdated = true
-		}
+	// 	for _, endpointSlice := range toActionList {
+	// 		esCopy := endpointSlice.DeepCopy()
+	// 		epsCopy := esCopy.Endpoints
+	// 		portsCopy := esCopy.Ports
+	// 		sortEpsEndpoints(epsCopy)
+	// 		sortEpsPorts(portsCopy)
+	// 		klog.V(4).Infof("### Endpoint copy: %#v", epsCopy)
+	// 		klog.V(4).Infof("### Endpoint compared: %t", apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy))
+	// 		klog.V(4).Infof("### EndpointPort length %d ---- %d", len(portsCopy), len(epPortsForEndpointSlice))
+	// 		klog.V(4).Infof("### EndpointPort compared %t", apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy))
+	// 		if len(esCopy.Endpoints) == len(epsForEndpointSlice) &&
+	// 			apiequality.Semantic.DeepDerivative(epsForEndpointSlice, epsCopy) &&
+	// 			apiequality.Semantic.DeepDerivative(epPortsForEndpointSlice, portsCopy) {
+	// 			klog.Infof("skip to update endpointslice %s as semantic deep derivative", esCopy.Name)
+	// 			continue
+	// 		}
+	// 		esCopy.Labels[discovery.LabelManagedBy] = controllerName
+	// 		esCopy.Endpoints = epsForEndpointSlice
+	// 		esCopy.Ports = epPortsForEndpointSlice
+	// 		_, err = c.k8sClientSet.DiscoveryV1().EndpointSlices(esCopy.Namespace).Update(context.TODO(),
+	// 			esCopy,
+	// 			metav1.UpdateOptions{})
+	// 		if err != nil {
+	// 			klog.Errorf("endpointslice update error: %v", err)
+	// 			return err
+	// 		}
+	// 		c.recorder.Event(esCopy, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
+	// 		endpointSliceUpdated = true
+	// 	}
 
-		if len(toActionList) > 1 {
-			for _, endpointSlice := range toActionList[1:] {
-				err := c.k8sClientSet.DiscoveryV1().EndpointSlices(endpointSlice.Namespace).Delete(context.TODO(),
-					endpointSlice.Name, metav1.DeleteOptions{})
-				if err != nil {
-					klog.Errorf("endpointslice delete error: %v", err)
-					continue
-				}
-				klog.Infof("deleted endpointslice %s", endpointSlice.Name)
-			}
-		}
-		return nil
-	})
-	if retryErr != nil {
-		klog.Errorf("endpointslice update error: %v", retryErr)
-		return retryErr
-	}
+	// 	if len(toActionList) > 1 {
+	// 		for _, endpointSlice := range toActionList[1:] {
+	// 			err := c.k8sClientSet.DiscoveryV1().EndpointSlices(endpointSlice.Namespace).Delete(context.TODO(),
+	// 				endpointSlice.Name, metav1.DeleteOptions{})
+	// 			if err != nil {
+	// 				klog.Errorf("endpointslice delete error: %v", err)
+	// 				continue
+	// 			}
+	// 			klog.Infof("deleted endpointslice %s", endpointSlice.Name)
+	// 		}
+	// 	}
+	// 	return nil
+	// })
+	// if retryErr != nil {
+	// 	klog.Errorf("endpointslice update error: %v", retryErr)
+	// 	return retryErr
+	// }
 
-	if endpointSliceUpdated {
-		klog.V(3).Info("endpointslice updated successfully")
-		c.recorder.Event(svc, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
-	}
+	// if endpointSliceUpdated {
+	// 	klog.V(3).Info("endpointslice updated successfully")
+	// 	c.recorder.Event(svc, corev1.EventTypeNormal, msg, "EndpointSlices update successful")
+	// }
 
 	return nil
 }
@@ -480,7 +444,7 @@ func (c *NetworkController) handlePodEvent(obj interface{}) {
 	// if no network annotation discard
 	_, ok = pod.GetAnnotations()[selectionsKey]
 	if !ok {
-		klog.V(4).Info("skipping pod event: network annotations missing")
+		klog.V(4).Infof("skipping pod [%v/%v] event: network annotations missing", pod.Namespace, pod.Name)
 		return
 	}
 
@@ -554,19 +518,6 @@ func (c *NetworkController) handleNetAttachDefDeleteEvent(obj interface{}) {
 	}
 }
 
-func (c *NetworkController) handleEndpointSliceEvent(obj interface{}) {
-	endpointSlice := obj.(*discovery.EndpointSlice)
-	if endpointSlice == nil || endpointSlice.Labels == nil {
-		return
-	}
-	svcName, ok := endpointSlice.Labels[discovery.LabelServiceName]
-	if !ok || svcName == "" {
-		return
-	}
-	key := fmt.Sprintf("%s/%s", endpointSlice.Namespace, svcName)
-	c.workqueue.AddRateLimited(key)
-}
-
 // Run will set up the event handlers for types we are interested in, as well
 // as syncing informer caches and starting workers. It will block until stopCh
 // is closed, at which point it will shutdown the workqueue and wait for
@@ -585,9 +536,9 @@ func (c *NetworkController) Run(workers int, stopChan <-chan struct{}) {
 		c.servicesSynced,
 		c.podsSynced,
 	}
-	if c.endpointSlicesSynced != nil {
-		cacheSyncs = append(cacheSyncs, c.endpointSlicesSynced)
-	}
+	// if c.endpointSlicesSynced != nil {
+	// 	cacheSyncs = append(cacheSyncs, c.endpointSlicesSynced)
+	// }
 	if ok := cache.WaitForCacheSync(stopChan, cacheSyncs...); !ok {
 		klog.Fatalf("failed waiting for caches to sync")
 	}
